@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import re
 from shapely.geometry import LineString, Point
+import glob
+
+log_dir = ''
 
 logic_str = 'LogicAmkor'
 #전체 분할 가로/세로 갯수
@@ -12,10 +15,10 @@ zone_size = int(divide_size / 2)
 #중심 셀 가로/세로 갯수
 center_size = 2
 #대각선 Minmax 검사시 선 추출 공차
-line_toler = 5
+line_toler = 0.1
 
 #측정방법
-logic_no = 1
+logic_no = 5
 
 if logic_no == 1:
     logic_str = 'LogicAmkor6'    
@@ -39,7 +42,7 @@ elif logic_no == 5:
     divide_size = 3
     zone_size = 1
     center_size = 1
-        
+
 # warpage shape 판정
 def decision_shape(zone_avg,zone_min,zone_max):
 
@@ -130,7 +133,7 @@ def AverageSection(folder_path, file):
         
     return section_avg,warpage_gap * 1000
 
-def MinmaxSection(folder_path, file):
+def MinmaxSection(tray_no, unit_index, folder_path, file):
     # 파일 경로
     file_path = os.path.join(folder_path, file)
     
@@ -139,54 +142,14 @@ def MinmaxSection(folder_path, file):
 
     # 데이터 타입 변환
     data = data.apply(pd.to_numeric, errors='coerce')
-    data = DiagonalSection(data)
-        
-    min_x, max_x = data['X'].min(), data['X'].max()
-    min_y, max_y = data['Y'].min(), data['Y'].max()
+    
+    data_min = data['Height'].min()
+    data_max = data['Height'].max()
+    warpage_gap = data_max - data_min
 
-    # 영역을 6등분할 크기를 계산
-    x_interval = (max_x - min_x) / divide_size
-    y_interval = (max_y - min_y) / divide_size
-
-    # section_avg = np.zeros(shape=(divide_size,divide_size), dtype=float)
-    section_min = np.zeros(shape=(divide_size,divide_size), dtype=float)
-    section_max = np.zeros(shape=(divide_size,divide_size), dtype=float)
-
-    # 6x6 영역을 순회하며 평균 높이 계산
-    for i in range(divide_size):
-        for j in range(divide_size):
-            # 현재 영역의 X, Y 좌표 범위를 계산
-            x_start = min_x + i * x_interval
-            x_end = x_start + x_interval
-            y_start = min_y + j * y_interval
-            y_end = y_start + y_interval
-            
-            # 현재 영역에 해당하는 데이터를 필터링
-            area_data = data[(data['X'] >= x_start) & (data['X'] < x_end) &
-                             (data['Y'] >= y_start) & (data['Y'] < y_end)]
-            
-            # 영역별 평균 높이를 계산하여 리스트에 추가
-            # avg_height = area_data['Height'].mean() if not area_data.empty else None
-            # section_avg[i,j] = avg_height
-
-            min_height  = area_data['Height'].min() if not area_data.empty else None
-            max_height = area_data['Height'].max() if not area_data.empty else None
-            section_min[i,j] = min_height
-            section_max[i,j] = max_height
-
-    end_index = divide_size - 1
-
-    min_val1 = min(section_min[0,0],section_min[end_index,end_index])
-    max_val1 = max(section_max[0,0],section_max[end_index,end_index])
-
-    min_val2 = min(section_min[end_index,0],section_min[0,end_index])
-    max_val2 = max(section_max[end_index,0],section_max[0,end_index])
-
-    warpage_diff = (min_val1 + max_val1 + min_val2 + max_val2)/2 
-    if np.isnan(warpage_diff):
-        warpage_diff = 0
-
-    return warpage_diff * 1000
+    warpage_diff = DiagonalSection(tray_no, unit_index, data)
+    
+    return warpage_diff * 1000, warpage_gap * 1000
 
 def AverageZone(section_avg):
 
@@ -258,7 +221,7 @@ def AverageZone(section_avg):
     return zone_avg,zone_min,zone_max
 
 
-def DiagonalSection(data):
+def DiagonalSection(tray_no, unit_index, data):
     
     # 좌상단과 우하단 점 찾기
     min_x, max_x = data['X'].min(), data['X'].max()
@@ -276,26 +239,29 @@ def DiagonalSection(data):
     left_btm_data = data[(data['X'] >= min_x - line_toler) & (data['X'] < min_x + line_toler) &
                                 (data['Y'] >= min_y - line_toler) & (data['Y'] < min_y + line_toler)]
     
+    if len(left_top_data) <= 0 or len(right_btm_data) <= 0 or len(right_top_data) <= 0 or len(left_btm_data) <= 0:
+        print('failed to get diagonal profile')
+        return pd.DataFrame()
+
     left_top_pt = left_top_data.values[0][:2]
     right_btm_pt = right_btm_data.values[0][:2]
     left_btm_pt = left_btm_data.values[0][:2]
     right_top_pt = right_top_data.values[0][:2]
 
-    height_diff = left_btm_data.values[0][2] - left_top_data.values[0][2]
+    height_diff1 = right_btm_data.values[0][2] - left_top_data.values[0][2]
+    min_val1, max_val1 = AdjustSlope(tray_no, unit_index, 0, data, left_top_pt, right_btm_pt, height_diff1)
 
-    close_points1 = AdjustSlope(data, left_top_pt, right_btm_pt, height_diff)
-    close_points2 = AdjustSlope(data, left_btm_pt, right_top_pt, height_diff)
+    height_diff2 = right_top_data.values[0][2] - left_btm_data.values[0][2]
+    min_val2, max_val2 = AdjustSlope(tray_no, unit_index, 1, data, left_btm_pt, right_top_pt, height_diff2)
 
-    # 두 결과 합치기 (공통 열 확인 필요)
-    close_points = pd.concat([close_points1, close_points2]).reset_index(drop=True)
+    warpage_diff = min_val1 + max_val1 + min_val2 + max_val2
+    if np.isnan(warpage_diff):
+        warpage_diff = 0
 
-
-    close_points.to_csv(r'd:\temp\abc.csv',mode='w', index=False)
-
-    return close_points
+    return warpage_diff
 
 
-def AdjustSlope(data, point1, point2, height_diff):
+def AdjustSlope(tray_no, unit_index, diagonal_type, data, point1, point2, height_diff):
     
     # 가상의 선 생성
     line1 = LineString([point1, point2])
@@ -312,10 +278,46 @@ def AdjustSlope(data, point1, point2, height_diff):
     # 좌상단 점으로부터의 거리 계산
     close_points['Dist'] = np.sqrt((close_points['X'] - point1[0]) ** 2 + (close_points['Y'] - point1[1]) ** 2)
 
+    close_points['Original'] = close_points['Height']
     # 높이 보정 적용
-    close_points['Height'] = close_points['Height'] + (close_points['Dist'] * slope)
+    min_idx = close_points['Dist'].idxmin()
+    close_points['Height'] = close_points['Height'] - (close_points['Dist'] * slope) - close_points.loc[min_idx, 'Height']
 
-    return close_points
+    dist_min = close_points['Dist'].min()
+    dist_max = close_points['Dist'].max()
+
+    profile_min = 0
+    profile_max = 0
+
+    if divide_size > 0:
+        dist_dist = dist_max - dist_min
+        center_dist = (dist_dist / divide_size) * center_size
+
+        center_start = (dist_dist - center_dist) * 0.5
+        center_end = center_start + center_dist
+
+        close_points['Filtered'] = close_points['Height']
+
+        close_points.loc[(close_points['Dist'] > center_start) & (close_points['Dist'] < center_end), 'Filtered'] = 0
+    
+        profile_min = close_points['Filtered'].min()
+        profile_max = close_points['Filtered'].max()
+        
+        column_names = ['X','Y','Dist','Original','Height','Filtered']
+        close_points = close_points[column_names]
+    else:
+        profile_min = close_points['Height'].min()
+        profile_max = close_points['Height'].max()
+        
+        column_names = ['X','Y','Dist','Original','Height']
+        close_points = close_points[column_names]
+
+    log_file = f'tray{tray_no}_unit{unit_index}_profile{diagonal_type}.csv'
+    log_path = os.path.join(log_dir, log_file)
+
+    close_points.to_csv(log_path, mode='w', index=False)
+
+    return profile_min, profile_max
 
 def is_starting_with_number(filename):
     # 정규표현식을 사용하여 파일명의 시작이 숫자로 이루어져 있는지 체크합니다.
@@ -340,15 +342,20 @@ def InspWarpageShapeTray(folder_path,folder):
         if not is_starting_with_number(file):
             continue
         
+        unit_index = file.split('_')[0]
+
         warpage_gap = 0
 
         if logic_no == 5:            
-            warpage_diff = MinmaxSection(folder_path, file)
+            warpage_diff, warpage_gap = MinmaxSection(tray_no, unit_index, folder_path, file)
+            if warpage_diff is None:
+                return
         else:
-            section_avg,warpage_gap = AverageSection(folder_path, file)
+            section_avg, warpage_gap = AverageSection(folder_path, file)
             zone_avg,zone_min,zone_max = AverageZone(section_avg)
             warpage_diff = decision_shape(zone_avg,zone_min,zone_max)
-            
+        
+
         warpage_shape = ''
         
         if warpage_diff > 0:
@@ -356,9 +363,7 @@ def InspWarpageShapeTray(folder_path,folder):
         else:
             warpage_shape = 'Crying'
 
-        unit_index = file.split('_')[0]
-
-        shape_str = "{}-{} : {}, {:.3f}, gap{:.3f}".format(tray_no,unit_index,warpage_shape,warpage_diff,warpage_gap)
+        shape_str = "{}-{} : {}, {:.3f}, gap {:.3f}".format(tray_no,unit_index,warpage_shape,warpage_diff,warpage_gap)
         print(shape_str)
 
         shape_df.loc[file_cnt] = [tray_no,unit_index,warpage_diff,warpage_shape,warpage_gap]
@@ -380,16 +385,35 @@ def get_folders_in_directory(path):
 def InspWarpageShapeAll():
 
     # 폴더 경로 (예시 경로입니다, 실제 폴더 경로를 사용자가 제공해야 함)
-    folder_path = r'D:\TEMP'
+    # folder_path = r'D:\TEMP'
     # folder_path = r'D:\TEMP\Simulator'
+    # folder_path = r'D:\10_고객사\01_대덕전자\대덕 A2 Unit\VOC\20240228_Warpage 알고리즘\시뮬레이션\20240404_TEST\Simulator'
+    folder_path = r'D:\10_고객사\01_대덕전자\대덕 A2 Unit\VOC\20240228_Warpage 알고리즘\시뮬레이션\20240419_TEST\Simulator'
+    root_path = folder_path
     folders_list = get_folders_in_directory(folder_path)
 
+    global log_dir
+    log_dir = os.path.join(folder_path, 'profile') 
+
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+    else:
+        # 폴더 내의 해당 확장자를 가진 파일 찾기
+        files_to_delete = glob.glob(os.path.join(log_dir, "*.csv"))
+
+        # 파일 삭제
+        for file_path in files_to_delete:
+            os.remove(file_path)
+            
     # 결과를 저장할 빈 데이터프레임 생성
     final_df = pd.DataFrame()
 
     for folder in folders_list:
         dir_path = os.path.join(folder_path,folder)
         shape_df = InspWarpageShapeTray(dir_path,folder)
+        if shape_df is None:
+            print('검사 실패!')
+            return
 
         # 최종 결과 데이터프레임에 추가
         final_df = pd.concat([final_df, shape_df])

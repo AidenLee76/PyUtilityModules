@@ -360,23 +360,25 @@ def MergeProfile(tray_no, unit_index, line_profiles):
         line_name = 'Height' + str(i)
         profile_df[line_name] = np.interp(new_dist, line_profiles[i]['Dist'], line_profiles[i]['Height'])
         plt.plot(profile_df['Dist'], profile_df[line_name], label=label_names[i])
-        
+    
+    save_name = f'tray{tray_no}_unit{unit_index}'
+
     # 그래프 그리기
-    plt.title('Profile Heights vs. Distance')
+    plt.title(save_name)
     plt.xlabel('Distance')
     plt.ylabel('Height')
     plt.legend()
     plt.grid(True)
 
     # 그래프 저장 (PNG 형식)
-    log_image  = f'tray{tray_no}_unit{unit_index}.png'
+    log_image  = f'{save_name}.png'
     image_path = os.path.join(log_dir, log_image)
     plt.savefig(image_path, dpi=300)  # 파일 이름과 해상도 설정
 
     # plt.show()
     # plt.close()
 
-    log_file = f'tray{tray_no}_unit{unit_index}.csv'
+    log_file = f'{save_name}.csv'
     log_path = os.path.join(log_dir, log_file)
 
     profile_df.to_csv(log_path, mode='w', index=False)

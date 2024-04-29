@@ -4,6 +4,12 @@ import numpy as np
 import re
 from shapely.geometry import LineString, Point
 import glob
+from scipy.interpolate import interp1d
+import matplotlib.pyplot as plt
+
+# 한글 폰트 설정
+plt.rc('font', family='Malgun Gothic')  # 'NanumBarunGothic' 폰트를 사용
+plt.rc('axes', unicode_minus=False)  # 마이너스 기호 깨짐 방지
 
 log_dir = ''
 
@@ -245,7 +251,8 @@ def DiagonalSection(tray_no, unit_index, data, cross_check):
         print('failed to get diagonal profile')
         return pd.DataFrame()
 
-    line_profile = pd.DataFrame()[4]
+    line_profiles = [pd.DataFrame() for _ in range(4)]
+
     
     # 대각선 방향에 대한 측정
     left_top_pt = left_top_data.values[0][:2]
@@ -254,10 +261,10 @@ def DiagonalSection(tray_no, unit_index, data, cross_check):
     right_top_pt = right_top_data.values[0][:2]
 
     height_diff1 = right_btm_data.values[0][2] - left_top_data.values[0][2]
-    min_val1, max_val1 = AdjustSlope(tray_no, unit_index, 0, data, left_top_pt, right_btm_pt, height_diff1, line_profile[0])
+    line_profiles[0], min_val1, max_val1 = AdjustSlope(tray_no, unit_index, 0, data, left_top_pt, right_btm_pt, height_diff1)
 
     height_diff2 = right_top_data.values[0][2] - left_btm_data.values[0][2]
-    min_val2, max_val2 = AdjustSlope(tray_no, unit_index, 1, data, left_btm_pt, right_top_pt, height_diff2, line_profile[1])
+    line_profiles[1], min_val2, max_val2 = AdjustSlope(tray_no, unit_index, 1, data, left_btm_pt, right_top_pt, height_diff2)
     
     diagonal_diff = min_val1 + max_val1 + min_val2 + max_val2
 
@@ -293,35 +300,17 @@ def DiagonalSection(tray_no, unit_index, data, cross_check):
         bottom_pt = bottom_data.values[0][:2]
     
         height_diff3 = right_data.values[0][2] - left_data.values[0][2]        
-        min_val3, max_val3 = AdjustSlope(tray_no, unit_index, 2, data, left_pt, right_pt, height_diff3, line_profile[2])
+        line_profiles[2], min_val3, max_val3 = AdjustSlope(tray_no, unit_index, 2, data, left_pt, right_pt, height_diff3)
         
-        height_diff4 = top_data.values[0][2] - bottom_data.values[0][2]
-        min_val4, max_val4 = AdjustSlope(tray_no, unit_index, 3, data, top_pt, bottom_pt, height_diff4, line_profile[3])
+        height_diff4 = bottom_data.values[0][2] - top_data.values[0][2]
+        line_profiles[3], min_val4, max_val4 = AdjustSlope(tray_no, unit_index, 3, data, top_pt, bottom_pt, height_diff4)
 
         cross_diff = min_val3 + max_val3 + min_val4 + max_val4
         line_cnt  = 4
 
     chart_mode = 2
 
-    all_profile = pd.DataFrame()
-    if chart_mode == 1:
-        # 보정 전/후 프로파일 모두 출력
-
-        for i in range(line_cnt):
-
-            if i == 0:
-                all_profile = line_profile[0]
-            else:
-                all_profile = pd.concat(all_profile,line_profile[i])
-
-    elif chart_mode == 2:
-        # 보정 후 필터된 대각선,십자선 4개 라인을 겹처서 보여줌
-
-        all_profile = line_profile[0]['X','Y','Dist1']
-
-        for i in range(line_cnt):
-            index = str(i + 1)
-            all_profile['Height' + index] = line_profile[i]['Filter' + index]
+    MergeProfile(tray_no, unit_index, line_profiles)
 
     warpage_diff = diagonal_diff + cross_diff
 
@@ -330,14 +319,71 @@ def DiagonalSection(tray_no, unit_index, data, cross_check):
 
     return warpage_diff
 
-
-def AdjustSlope(tray_no, unit_index, line_type, data, point1, point2, height_diff, close_points):
+def MergeProfile(tray_no, unit_index, line_profiles):
     
-    col_dist = 'Dist' + str(line_type)
-    col_org = 'Original' + str(line_type)
-    col_height  = 'Height' + str(line_type)    
-    col_filter  = 'Filter' + str(line_type)
+    line_cnt = len(line_profiles)
+    
+    max_pos = 0
+    for i in range(line_cnt):
+        
+        line_max = line_profiles[i]['Dist'].max()
 
+        if i == 0:
+            max_pos = line_max
+        else:
+            if line_max > max_pos:
+                max_pos = line_max
+
+    for i in range(line_cnt):
+        line_max = line_profiles[i]['Dist'].max()
+        scale_value = max_pos / line_max
+        line_profiles[i]['Dist'] = line_profiles[i]['Dist'] * scale_value
+    
+    max_line_dist = max_pos
+    point_step = max_line_dist / 100
+
+    # 새로운 Dist 축을 정의 (예: -0.005부터 0.005까지 0.001 간격)
+    # max_pos를 포함
+    new_dist = np.arange(0, max_pos + point_step, point_step)
+
+    # 보간된 데이터프레임을 저장할 리스트 초기화 위치 조정
+    profile_df = pd.DataFrame()
+    profile_df['Dist'] = new_dist
+    
+    plt.figure(figsize=(10, 6))
+
+    label_names = ['대각선A','대각선B','가로선','세로선']
+
+    for i in range(line_cnt):    
+        # 선형 보간
+        
+        line_name = 'Height' + str(i)
+        profile_df[line_name] = np.interp(new_dist, line_profiles[i]['Dist'], line_profiles[i]['Height'])
+        plt.plot(profile_df['Dist'], profile_df[line_name], label=label_names[i])
+        
+    # 그래프 그리기
+    plt.title('Profile Heights vs. Distance')
+    plt.xlabel('Distance')
+    plt.ylabel('Height')
+    plt.legend()
+    plt.grid(True)
+
+    # 그래프 저장 (PNG 형식)
+    log_image  = f'tray{tray_no}_unit{unit_index}.png'
+    image_path = os.path.join(log_dir, log_image)
+    plt.savefig(image_path, dpi=300)  # 파일 이름과 해상도 설정
+
+    # plt.show()
+    # plt.close()
+
+    log_file = f'tray{tray_no}_unit{unit_index}.csv'
+    log_path = os.path.join(log_dir, log_file)
+
+    profile_df.to_csv(log_path, mode='w', index=False)
+
+
+def AdjustSlope(tray_no, unit_index, line_type, data, point1, point2, height_diff):
+    
     # 가상의 선 생성
     line1 = LineString([point1, point2])
 
@@ -351,15 +397,15 @@ def AdjustSlope(tray_no, unit_index, line_type, data, point1, point2, height_dif
     slope = height_diff / np.sqrt(x_diff**2 + y_diff**2)
 
     # 좌상단 점으로부터의 거리 계산
-    close_points[col_dist] = np.sqrt((close_points['X'] - point1[0]) ** 2 + (close_points['Y'] - point1[1]) ** 2)
+    close_points['Dist'] = np.sqrt((close_points['X'] - point1[0]) ** 2 + (close_points['Y'] - point1[1]) ** 2)
 
-    close_points[col_org] = close_points[col_height]
+    close_points['Original'] = close_points['Height']
     # 높이 보정 적용
-    min_idx = close_points[col_dist].idxmin()
-    close_points[col_height] = close_points[col_height] - (close_points[col_dist] * slope) - close_points.loc[min_idx, col_height]
+    min_idx = close_points['Dist'].idxmin()
+    close_points['Height'] = close_points['Height'] - (close_points['Dist'] * slope) - close_points.loc[min_idx, 'Height']
 
-    dist_min = close_points[col_dist].min()
-    dist_max = close_points[col_dist].max()
+    dist_min = close_points['Dist'].min()
+    dist_max = close_points['Dist'].max()
 
     profile_min = 0
     profile_max = 0
@@ -371,28 +417,29 @@ def AdjustSlope(tray_no, unit_index, line_type, data, point1, point2, height_dif
         center_start = (dist_dist - center_dist) * 0.5
         center_end = center_start + center_dist
 
-        close_points[col_filter] = close_points[col_height]
+        close_points['Filter'] = close_points['Height']
 
-        close_points.loc[(close_points[col_dist] > center_start) & (close_points[col_dist] < center_end), col_filter] = 0
+        close_points.loc[(close_points['Dist'] > center_start) & (close_points['Dist'] < center_end), 'Filter'] = 0
     
-        profile_min = close_points[col_filter].min()
-        profile_max = close_points[col_filter].max()
+        profile_min = close_points['Filter'].min()
+        profile_max = close_points['Filter'].max()
         
-        column_names = ['X','Y',col_dist,col_org,col_height,col_filter]
+        column_names = ['X','Y','Dist','Original','Height','Filter']
         close_points = close_points[column_names]
     else:
-        profile_min = close_points[col_height].min()
-        profile_max = close_points[col_height].max()
+        profile_min = close_points['Height'].min()
+        profile_max = close_points['Height'].max()
         
-        column_names = ['X','Y',col_dist,col_org,col_height]
+        column_names = ['X','Y','Dist','Original','Height']
         close_points = close_points[column_names]
 
-    log_file = f'tray{tray_no}_unit{unit_index}_profile{line_type}.csv'
-    log_path = os.path.join(log_dir, log_file)
+    close_points = close_points.sort_values(by='Dist')
 
-    close_points.to_csv(log_path, mode='w', index=False)
+    # log_file = f'tray{tray_no}_unit{unit_index}_profile{line_type}.csv'
+    # log_path = os.path.join(log_dir, log_file)
+    # close_points.to_csv(log_path, mode='w', index=False)
 
-    return profile_min, profile_max
+    return close_points, profile_min, profile_max
 
 def is_starting_with_number(filename):
     # 정규표현식을 사용하여 파일명의 시작이 숫자로 이루어져 있는지 체크합니다.
